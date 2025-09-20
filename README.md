@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>طبول بالكاميرا</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#111"/>
+  <link rel="icon" href="icon-192.png">
+  <style>
+    body{margin:0;background:#111;color:#eee;font-family:system-ui,sans-serif}
+    header{padding:12px 16px;background:#181818;position:sticky;top:0}
+    .wrap{display:grid;gap:10px;padding:10px}
+    video,canvas{width:100%;max-width:900px;aspect-ratio:16/9;background:#000;border-radius:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    button{padding:10px 14px;border:0;border-radius:10px;background:#2b2b2b;color:#fff;cursor:pointer}
+    .pill{font-size:12px;opacity:.8}
+  </style>
+</head>
+<body>
+  <header>
+    <strong>طبول بالكاميرا</strong>
+    <span class="pill">يسار=طبل كبير • يمين=طبل صغير • شدّة الضرب = شدة الصوت</span>
+    <button id="installBtn" style="float:left;display:none">تثبيت التطبيق</button>
+  </header>
+
+  <div class="wrap">
+    <div class="row">
+      <button id="startBtn">تشغيل الكاميرا</button>
+      <button id="muteBtn">إسكات الصوت</button>
+      <span id="status" class="pill">جاهز</span>
+    </div>
+    <video id="video" playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <script type="module">
+    // — تسجيل Service Worker (للأوفلاين والتثبيت) —
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js');
+    }
+
+    // — زر التثبيت —
+    let deferredPrompt;
+    const installBtn = document.getElementById('installBtn');
+    window.addEventListener('beforeinstallprompt', (e)=>{
+      e.preventDefault(); deferredPrompt = e; installBtn.style.display='inline-block';
+    });
+    installBtn.onclick = async ()=>{
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice; deferredPrompt = null; installBtn.style.display='none';
+    };
+
+    // ====== الكود نفسه (مقتبس من النسخة السابقة) ======
+    import {FilesetResolver, HandLandmarker}
+      from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js";
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('overlay');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const muteBtn = document.getElementById('muteBtn');
+
+    let audioCtx=null, muted=false;
+    const ensureAudio=()=>{ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); };
+    const playKick=(s=1)=>{ if(muted) return; ensureAudio();
+      const t=audioCtx.currentTime, o=audioCtx.createOscillator(), g=audioCtx.createGain();
+      o.type='sine'; o.frequency.setValueAtTime(150+200*s,t); o.frequency.exponentialRampToValueAtTime(40,t+0.1);
+      g.gain.setValueAtTime(0.001,t); g.gain.exponentialRampToValueAtTime(0.8*s,t+0.005); g.gain.exponentialRampToValueAtTime(0.0001,t+0.25);
+      o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t+0.25);
+    };
+    const playSnare=(s=1)=>{ if(muted) return; ensureAudio();
+      const t=audioCtx.currentTime, N=2*audioCtx.sampleRate*0.15, buf=audioCtx.createBuffer(1,N,audioCtx.sampleRate);
+      const ch=buf.getChannelData(0); for(let i=0;i<N;i++) ch[i]=(Math.random()*2-1)*0.6;
+      const src=audioCtx.createBufferSource(); src.buffer=buf;
+      const hp=audioCtx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1500;
+      const g=audioCtx.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.7*s,t+0.005); g.gain.exponentialRampToValueAtTime(0.0001,t+0.12);
+      src.connect(hp).connect(g).connect(audioCtx.destination); src.start(t); src.stop(t+0.12);
+    };
+
+    let handLandmarker, running=false;
+    async function initHand(){
+      statusEl.textContent='تحميل نموذج اليد...';
+      const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+      handLandmarker = await HandLandmarker.createFromOptions(fileset,{
+        baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-tasks/hand_landmarker/hand_landmarker.task" },
+        numHands:2, runningMode:"VIDEO"
+      });
+      statusEl.textContent='جاهز — اسمحي بالكاميرا ثم ابدئي الضرب 🙌';
+    }
+    async function startCamera(){
+      const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});
+      video.srcObject=stream; await video.play();
+      canvas.width=video.videoWidth||1280; canvas.height=video.videoHeight||720; running=true; requestAnimationFrame(loop);
+    }
+
+    const lastY=new Map(), lastT=new Map(), hitCooldown=new Map();
+    function loop(){
+      if(!running) return;
+      const W=canvas.width, H=canvas.height, zoneH=H*0.35, zoneY=H-zoneH;
+      ctx.drawImage(video,0,0,W,H);
+      ctx.globalAlpha=.08; ctx.fillStyle='#0f0'; ctx.fillRect(0,zoneY,W*.5,zoneH);
+      ctx.fillStyle='#09f'; ctx.fillRect(W*.5,zoneY,W*.5,zoneH); ctx.globalAlpha=1;
+      const now=performance.now();
+      if(handLandmarker && video.readyState>=2){
+        const r=handLandmarker.detectForVideo(video, now);
+        if(r && r.landmarks){
+          for(let i=0;i<r.landmarks.length;i++){
+            const p=r.landmarks[i][8]||r.landmarks[i][0], x=p.x*W, y=p.y*H;
+            ctx.beginPath(); ctx.arc(x,y,8,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
+            const key='h'+i, yp=lastY.get(key)??y, tp=lastT.get(key)??now, dt=Math.max(1,now-tp), vy=(y-yp)/dt;
+            const inZone=y>zoneY, cool=hitCooldown.get(key)??0;
+            if(inZone && vy>0.5 && now-cool>120){
+              const s=Math.min(1,Math.max(0.2,vy*2.2)); (x<W*.5?playKick:playSnare)(s); hitCooldown.set(key,now);
+            }
+            lastY.set(key,y); lastT.set(key,now);
+          }
+        }
+      }
+      requestAnimationFrame(loop);
+    }
+
+    document.getElementById('startBtn').onclick = async ()=>{ await initHand(); await startCamera(); };
+    document.getElementById('muteBtn').onclick = ()=>{ muted=!muted; muteBtn.textContent=muted?'تشغيل الصوت':'إسكات الصوت'; };
+    window.addEventListener('pointerdown', ()=>{ if(!audioCtx){ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); } }, {once:true});
+  </script>
+</body>
+</html>
+{
+  "name": "طبول بالكاميرا",
+  "short_name": "طبول",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "landscape",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+// اسم الكاش
+const CACHE = 'drums-v1';
+
+// ملفاتنا المحلية + ملفات خارجيّة مهمّة (Mediapipe + نموذج اليد)
+const PRECACHE_URLS = [
+  './', './index.html', './manifest.json', './icon-192.png', './icon-512.png',
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js',
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm/vision_wasm_internal.wasm',
+  'https://storage.googleapis.com/mediapipe-tasks/hand_landmarker/hand_landmarker.task'
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(PRECACHE_URLS)).then(self.skipWaiting()));
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(keys.map(k => k !== CACHE ? caches.delete(k) : null)))
+      .then(() => self.clients.claim())
+  );
+});
+
+// استراتيجية بسيطة: Cache-first ثم الشبكة احتياطًا
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  event.respondWith(
+    caches.match(req).then(cached => cached || fetch(req).then(res => {
+      // خزّن نسخ GET فقط
+      if (req.method === 'GET' && res.status === 200) {
+        const copy = res.clone();
+        caches.open(CACHE).then(cache => cache.put(req, copy));
+      }
+      return res;
+    }))
+  );
+});
